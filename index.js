@@ -2,9 +2,18 @@ require('dotenv').config();
 const TelegramBot = require('node-telegram-bot-api');
 const { WA } = require('./lib/wa');
 const fs = require('fs');
+const http = require('http');
+
+// --- RENDER HEALTH CHECK SERVER ---
+// This stops Render from killing the bot for "No open ports detected"
+const PORT = process.env.PORT || 3000;
+http.createServer((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'text/plain' });
+    res.end('Bot is running');
+}).listen(PORT, () => console.log(`✅ Health check listening on port ${PORT}`));
 
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN;
-if (!TOKEN) { console.log('❌ .env mein TELEGRAM_BOT_TOKEN daalo!'); process.exit(1); }
+if (!TOKEN) { console.log('❌ Environment variable TELEGRAM_BOT_TOKEN is missing!'); process.exit(1); }
 
 const bot = new TelegramBot(TOKEN, { polling: true });
 const wa = new WA();
@@ -47,16 +56,35 @@ bot.on('message', async (msg) => {
     if (command === '/link') {
         if (!args[1]) return bot.sendMessage(chatId, '❌ Format: /link 919876543210');
         const phone = args[1].replace(/\D/g, '');
-        bot.sendMessage(chatId, `⏳ Generating pairing code for +${phone}...`);
+        
+        if (wa.sock && wa.state === 'online') {
+            return bot.sendMessage(chatId, '✅ WhatsApp is already connected.');
+        }
+
+        bot.sendMessage(chatId, `⏳ Generating pairing code for +${phone}... Please wait.`);
         
         try {
             const sock = await wa.start();
-            if (!sock.authState.creds.registered) {
-                setTimeout(async () => {
-                    const code = await sock.requestPairingCode(phone);
-                    bot.sendMessage(chatId, `🔑 **WhatsApp Code:** \`${code}\`\n\nWhatsApp -> Linked Devices -> Link with Phone Number`, { parse_mode: 'Markdown' });
-                }, 3000);
-            }
+            let pairingRequested = false;
+
+            // FIX: Wait for the connection to be ready before requesting the code
+            sock.ev.on('connection.update', async (update) => {
+                const { connection, qr } = update;
+                
+                if ((connection === 'connecting' || qr) && !pairingRequested) {
+                    pairingRequested = true;
+                    try {
+                        const code = await sock.requestPairingCode(phone);
+                        bot.sendMessage(chatId, `🔑 **WhatsApp Code:** \`${code}\`\n\nWhatsApp -> Linked Devices -> Link with Phone Number`, { parse_mode: 'Markdown' });
+                    } catch (err) {
+                        bot.sendMessage(chatId, `❌ Pairing failed: ${err.message}. Try /link again.`);
+                    }
+                }
+                
+                if (connection === 'open') {
+                    bot.sendMessage(chatId, '✅ WhatsApp connected successfully!');
+                }
+            });
         } catch (e) {
             bot.sendMessage(chatId, `❌ Error: ${e.message}`);
         }
@@ -86,7 +114,9 @@ bot.on('message', async (msg) => {
         const target = args[1].replace(/\D/g, '') + '@s.whatsapp.net';
         bot.sendMessage(chatId, `🚀 Spamming +${args[1]}...`);
         for (let i = 0; i < 30; i++) {
-            await wa.sock.sendMessage(target, { text: `${SPAM_TEXT} [${i+1}]` });
+            try {
+                await wa.sock.sendMessage(target, { text: `${SPAM_TEXT} [${i+1}]` });
+            } catch (e) {}
             await new Promise(r => setTimeout(r, 1000));
         }
         bot.sendMessage(chatId, '✅ Spam done.');
@@ -98,7 +128,7 @@ bot.on('message', async (msg) => {
         bot.sendMessage(chatId, `⚡ FAST Spamming +${args[1]}...`);
         const promises = [];
         for (let i = 0; i < 20; i++) {
-            promises.push(wa.sock.sendMessage(target, { text: `FAST SPAM [${i+1}]` }));
+            promises.push(wa.sock.sendMessage(target, { text: `FAST SPAM [${i+1}]` }).catch(() => {}));
         }
         await Promise.all(promises);
         bot.sendMessage(chatId, '✅ Fast spam done.');
@@ -109,7 +139,9 @@ bot.on('message', async (msg) => {
         if (!groupId || !groupId.includes('@g.us')) return bot.sendMessage(chatId, '❌ Format: /groupspam 123456789-123456@g.us');
         bot.sendMessage(chatId, `🚀 Spamming Group...`);
         for (let i = 0; i < 50; i++) {
-            await wa.sock.sendMessage(groupId, { text: `${SPAM_TEXT} [${i+1}]` });
+            try {
+                await wa.sock.sendMessage(groupId, { text: `${SPAM_TEXT} [${i+1}]` });
+            } catch (e) {}
             await new Promise(r => setTimeout(r, 800));
         }
         bot.sendMessage(chatId, '✅ Group spam done.');
@@ -122,7 +154,9 @@ bot.on('message', async (msg) => {
             const buffer = fs.readFileSync('./assets/sticker.webp');
             bot.sendMessage(chatId, `🧸 Sticker Spam on +${args[1]}...`);
             for (let i = 0; i < 30; i++) {
-                await wa.sock.sendMessage(target, { sticker: buffer });
+                try {
+                    await wa.sock.sendMessage(target, { sticker: buffer });
+                } catch (e) {}
                 await new Promise(r => setTimeout(r, 300));
             }
             bot.sendMessage(chatId, '✅ Sticker spam done.');
